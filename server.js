@@ -64,16 +64,41 @@ async function queryBedrock(prompt) {
     }
 }
 
+// Helper function to extract JSON from markdown response
+function extractJsonFromResponse(response) {
+    const jsonMatch = response.match(/```json\n([\s\S]*?)\n```/);
+    if (jsonMatch && jsonMatch[1]) {
+        try {
+            return JSON.parse(jsonMatch[1]);
+        } catch (error) {
+            console.error('Error parsing extracted JSON:', error);
+            throw new Error('Failed to parse JSON from response');
+        }
+    }
+    throw new Error('No JSON found in response');
+}
+
 // API Endpoints
 app.post('/api/pto/query', async (req, res) => {
     try {
         const { query } = req.body;
         const context = JSON.stringify(ptoRecords);
-        const prompt = `Given the following PTO records: ${context}\n\nUser query: ${query}\n\nProvide a natural response about the PTO information.`;
+        const prompt = `Given the following PTO records: ${context}\n\nUser query: ${query}\n\nProvide a natural response about the PTO information. If the response contains any JSON data, format it as a markdown code block.`;
         
         const response = await queryBedrock(prompt);
-        res.json({ response });
+        let result;
+        
+        // Check if the response contains a JSON block
+        try {
+            result = extractJsonFromResponse(response);
+        } catch {
+            // If no JSON block found, use the text response
+            result = { response };
+        }
+        
+        res.json(result);
     } catch (error) {
+        console.error('API Error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -82,20 +107,29 @@ app.post('/api/pto/schedule', async (req, res) => {
     try {
         const { request } = req.body;
         const context = JSON.stringify(ptoRecords);
-        const prompt = `Given the following PTO records: ${context}\n\nUser request: ${request}\n\nParse this request and respond with a JSON object containing: startDate, endDate, type, and numberOfDays.`;
+        const prompt = `Given the following PTO records: ${context}\n\nUser request: ${request}\n\nParse this request and respond with a JSON object containing: startDate, endDate, type, and numberOfDays. Format your response as a markdown code block with JSON.`;
         
         const response = await queryBedrock(prompt);
+        let ptoRequest;
         
-        // Parse the AI response and add to records
-        const ptoRequest = JSON.parse(response);
-        ptoRecords.push({
-            ...ptoRequest,
-            id: Date.now().toString(),
-            status: 'approved'
-        });
+        try {
+            ptoRequest = extractJsonFromResponse(response);
+        } catch (parseError) {
+            console.error('Error parsing PTO request:', parseError);
+            throw new Error('Could not parse the AI response into a valid PTO request');
+        }
+
+        if (!ptoRequest.startDate || !ptoRequest.endDate) {
+            throw new Error('Invalid PTO request format from AI');
+        }
+
+        ptoRequest.id = Date.now().toString();
+        ptoRequest.status = 'approved';
+        ptoRecords.push(ptoRequest);
         
         res.json({ message: 'PTO scheduled successfully', pto: ptoRequest });
     } catch (error) {
+        console.error('API Error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -104,15 +138,21 @@ app.put('/api/pto/update', async (req, res) => {
     try {
         const { request } = req.body;
         const context = JSON.stringify(ptoRecords);
-        const prompt = `Given the following PTO records: ${context}\n\nUpdate request: ${request}\n\nIdentify the PTO to update and provide the new details as JSON.`;
+        const prompt = `Given the following PTO records: ${context}\n\nUpdate request: ${request}\n\nIdentify the PTO to update and provide the new details as JSON. Format your response as a markdown code block with JSON.`;
         
         const response = await queryBedrock(prompt);
-        const updateDetails = JSON.parse(response);
+        let updateDetails;
         
-        // Update the matching record
+        try {
+            updateDetails = extractJsonFromResponse(response);
+        } catch (parseError) {
+            console.error('Error parsing update details:', parseError);
+            throw new Error('Could not parse the AI response');
+        }
+
         const recordIndex = ptoRecords.findIndex(record => 
             record.startDate === updateDetails.originalStartDate);
-            
+
         if (recordIndex >= 0) {
             ptoRecords[recordIndex] = {
                 ...ptoRecords[recordIndex],
@@ -123,6 +163,7 @@ app.put('/api/pto/update', async (req, res) => {
             res.status(404).json({ error: 'PTO record not found' });
         }
     } catch (error) {
+        console.error('API Error:', error);
         res.status(500).json({ error: error.message });
     }
 });
