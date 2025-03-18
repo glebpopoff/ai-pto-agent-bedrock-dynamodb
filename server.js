@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+const { DynamoDBClient, CreateTableCommand, PutItemCommand, QueryCommand, ScanCommand, UpdateItemCommand } = require("@aws-sdk/client-dynamodb");
 const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-bedrock-runtime");
 const { fromIni } = require("@aws-sdk/credential-provider-ini");
 
@@ -11,21 +11,143 @@ const port = process.env.PORT || 3000;
 app.use(express.static('public'));
 app.use(bodyParser.json());
 
-// Initialize AWS Bedrock client
-const bedrockClient = new BedrockRuntimeClient({
+// AWS configuration
+const awsConfig = {
     region: process.env.AWS_REGION || 'us-east-1',
     credentials: fromIni({ profile: "openbook" })
-});
+};
 
+// Initialize AWS clients
+const bedrockClient = new BedrockRuntimeClient(awsConfig);
+const dynamoClient = new DynamoDBClient(awsConfig);
 
+// DynamoDB table name
+const tableName = 'OB-PTORecords-POC';
 
-const dynomoClient = new DynamoDBClient({
-  region: "us-east-1",
-  credentials: fromIni({ profile: "openbook" })
-});
+// Initialize DynamoDB table
+async function initializeDynamoDB() {
+    try {
+        const createTableCommand = new CreateTableCommand({
+            TableName: tableName,
+            KeySchema: [
+                { AttributeName: 'id', KeyType: 'HASH' }
+            ],
+            AttributeDefinitions: [
+                { AttributeName: 'id', AttributeType: 'S' }
+            ],
+            ProvisionedThroughput: {
+                ReadCapacityUnits: 5,
+                WriteCapacityUnits: 5
+            }
+        });
 
-// In-memory storage for PTO records (replace with database in production)
-let ptoRecords = [];
+        await dynamoClient.send(createTableCommand);
+        console.log('DynamoDB table created successfully');
+    } catch (error) {
+        if (error.name === 'ResourceInUseException') {
+            console.log('DynamoDB table already exists');
+        } else {
+            console.error('Error creating DynamoDB table:', error);
+        }
+    }
+}
+
+// DynamoDB operations
+async function savePTORecord(ptoRecord) {
+    try {
+        const command = new PutItemCommand({
+            TableName: tableName,
+            Item: {
+                id: { S: ptoRecord.id },
+                startDate: { S: ptoRecord.startDate },
+                endDate: { S: ptoRecord.endDate },
+                type: { S: ptoRecord.type },
+                numberOfDays: { N: ptoRecord.numberOfDays.toString() },
+                status: { S: ptoRecord.status }
+            }
+        });
+
+        await dynamoClient.send(command);
+    } catch (error) {
+        console.error('Error saving PTO record:', error);
+        if (error.name === 'ResourceNotFoundException') {
+            console.log('Table not found, creating...');
+            await initializeDynamoDB();
+            // Retry the save operation
+            await dynamoClient.send(command);
+        } else {
+            throw error;
+        }
+    }
+}
+
+async function getAllPTORecords() {
+    try {
+        const command = new ScanCommand({
+            TableName: tableName
+        });
+
+        const response = await dynamoClient.send(command);
+        return (response.Items || []).map(item => ({
+            id: item.id.S,
+            startDate: item.startDate.S,
+            endDate: item.endDate.S,
+            type: item.type.S,
+            numberOfDays: parseInt(item.numberOfDays.N),
+            status: item.status.S
+        }));
+    } catch (error) {
+        console.error('Error getting PTO records:', error);
+        if (error.name === 'ResourceNotFoundException') {
+            console.log('Table not found, creating...');
+            await initializeDynamoDB();
+            return [];
+        }
+        throw error;
+    }
+}
+
+async function updatePTORecord(id, updates) {
+    try {
+        const updateExpressions = [];
+        const expressionAttributeNames = {};
+        const expressionAttributeValues = {};
+        
+        Object.entries(updates).forEach(([key, value]) => {
+            if (key !== 'id') {
+                updateExpressions.push(`#${key} = :${key}`);
+                expressionAttributeNames[`#${key}`] = key;
+                expressionAttributeValues[`:${key}`] = 
+                    typeof value === 'number' ? { N: value.toString() } :
+                    typeof value === 'boolean' ? { BOOL: value } :
+                    { S: value };
+            }
+        });
+
+        const command = new UpdateItemCommand({
+            TableName: tableName,
+            Key: { id: { S: id } },
+            UpdateExpression: `SET ${updateExpressions.join(', ')}`,
+            ExpressionAttributeNames: expressionAttributeNames,
+            ExpressionAttributeValues: expressionAttributeValues
+        });
+
+        await dynamoClient.send(command);
+    } catch (error) {
+        console.error('Error updating PTO record:', error);
+        if (error.name === 'ResourceNotFoundException') {
+            console.log('Table not found, creating...');
+            await initializeDynamoDB();
+            // Retry the update operation
+            await dynamoClient.send(command);
+        } else {
+            throw error;
+        }
+    }
+}
+
+// Initialize DynamoDB on startup
+initializeDynamoDB().catch(console.error);
 
 // Helper function to interact with Bedrock
 async function queryBedrock(prompt) {
@@ -79,34 +201,11 @@ function extractJsonFromResponse(response) {
 }
 
 // API Endpoints
-app.post('/api/pto/query', async (req, res) => {
-    try {
-        const { query } = req.body;
-        const context = JSON.stringify(ptoRecords);
-        const prompt = `Given the following PTO records: ${context}\n\nUser query: ${query}\n\nProvide a natural response about the PTO information. If the response contains any JSON data, format it as a markdown code block.`;
-        
-        const response = await queryBedrock(prompt);
-        let result;
-        
-        // Check if the response contains a JSON block
-        try {
-            result = extractJsonFromResponse(response);
-        } catch {
-            // If no JSON block found, use the text response
-            result = { response };
-        }
-        
-        res.json(result);
-    } catch (error) {
-        console.error('API Error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
 app.post('/api/pto/schedule', async (req, res) => {
     try {
         const { request } = req.body;
-        const context = JSON.stringify(ptoRecords);
+        const records = await getAllPTORecords();
+        const context = JSON.stringify(records);
         const prompt = `Given the following PTO records: ${context}\n\nUser request: ${request}\n\nParse this request and respond with a JSON object containing: startDate, endDate, type, and numberOfDays. Format your response as a markdown code block with JSON.`;
         
         const response = await queryBedrock(prompt);
@@ -125,9 +224,32 @@ app.post('/api/pto/schedule', async (req, res) => {
 
         ptoRequest.id = Date.now().toString();
         ptoRequest.status = 'approved';
-        ptoRecords.push(ptoRequest);
         
+        await savePTORecord(ptoRequest);
         res.json({ message: 'PTO scheduled successfully', pto: ptoRequest });
+    } catch (error) {
+        console.error('API Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post('/api/pto/query', async (req, res) => {
+    try {
+        const { query } = req.body;
+        const records = await getAllPTORecords();
+        const context = JSON.stringify(records);
+        const prompt = `Given the following PTO records: ${context}\n\nUser query: ${query}\n\nProvide a natural response about the PTO information. If the response contains any JSON data, format it as a markdown code block.`;
+        
+        const response = await queryBedrock(prompt);
+        let result;
+        
+        try {
+            result = extractJsonFromResponse(response);
+        } catch {
+            result = { response };
+        }
+        
+        res.json(result);
     } catch (error) {
         console.error('API Error:', error);
         res.status(500).json({ error: error.message });
@@ -137,7 +259,8 @@ app.post('/api/pto/schedule', async (req, res) => {
 app.put('/api/pto/update', async (req, res) => {
     try {
         const { request } = req.body;
-        const context = JSON.stringify(ptoRecords);
+        const records = await getAllPTORecords();
+        const context = JSON.stringify(records);
         const prompt = `Given the following PTO records: ${context}\n\nUpdate request: ${request}\n\nIdentify the PTO to update and provide the new details as JSON. Format your response as a markdown code block with JSON.`;
         
         const response = await queryBedrock(prompt);
@@ -150,15 +273,13 @@ app.put('/api/pto/update', async (req, res) => {
             throw new Error('Could not parse the AI response');
         }
 
-        const recordIndex = ptoRecords.findIndex(record => 
+        const recordToUpdate = records.find(record => 
             record.startDate === updateDetails.originalStartDate);
 
-        if (recordIndex >= 0) {
-            ptoRecords[recordIndex] = {
-                ...ptoRecords[recordIndex],
-                ...updateDetails.newDetails
-            };
-            res.json({ message: 'PTO updated successfully', pto: ptoRecords[recordIndex] });
+        if (recordToUpdate) {
+            await updatePTORecord(recordToUpdate.id, updateDetails.newDetails);
+            const updatedRecord = { ...recordToUpdate, ...updateDetails.newDetails };
+            res.json({ message: 'PTO updated successfully', pto: updatedRecord });
         } else {
             res.status(404).json({ error: 'PTO record not found' });
         }
@@ -168,8 +289,14 @@ app.put('/api/pto/update', async (req, res) => {
     }
 });
 
-app.get('/api/pto/list', (req, res) => {
-    res.json(ptoRecords);
+app.get('/api/pto/list', async (req, res) => {
+    try {
+        const records = await getAllPTORecords();
+        res.json(records);
+    } catch (error) {
+        console.error('API Error:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 app.listen(port, () => {
