@@ -6,6 +6,7 @@ const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-be
 const { fromIni } = require("@aws-sdk/credential-provider-ini");
 const { parseRelativeDateRange } = require('./utils/dateUtils');
 const { PTO_CATEGORIES, isValidPTOCategory, extractPTOCategory } = require('./utils/ptoCategories');
+const { HOLIDAYS_2025, isWorkingDay, calculateWorkingDays, getHolidaysBetween } = require('./utils/holidayUtils');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -214,19 +215,17 @@ function extractJsonFromResponse(response) {
 }
 
 // API Endpoints
+app.get('/api/pto/holidays', (req, res) => {
+    res.json(HOLIDAYS_2025);
+});
+
 app.post('/api/pto/schedule', async (req, res) => {
     try {
         const { request } = req.body;
         const records = await getAllPTORecords();
         
-        // Extract PTO category from request
+        // Extract PTO category from request if present
         const category = extractPTOCategory(request);
-        if (!category) {
-            res.status(400).json({ 
-                error: 'Please specify a PTO category: ' + PTO_CATEGORIES.join(', ') 
-            });
-            return;
-        }
         
         // First try to parse relative dates from the request
         const dateRange = parseRelativeDateRange(request, new Date());
@@ -234,22 +233,41 @@ app.post('/api/pto/schedule', async (req, res) => {
         if (dateRange) {
             const ptoRequest = {
                 ...dateRange,
-                type: category,
+                type: category || 'Paid Time Off', // Default to PTO if no category specified
                 id: Date.now().toString(),
                 status: 'approved'
             };
             
             await savePTORecord(ptoRequest);
             res.json({ 
-                message: 'PTO scheduled successfully', 
+                message: `PTO scheduled successfully (${ptoRequest.numberOfDays} working day${ptoRequest.numberOfDays > 1 ? 's' : ''})${dateRange.holidayInfo || ''}`, 
                 pto: ptoRequest 
             });
             return;
         }
         
         // If relative date parsing fails, fall back to AI
-        const context = JSON.stringify(records);
-        const prompt = `Given the following PTO records: ${context}\n\nUser request: ${request}\n\nParse this request and respond with a JSON object containing: startDate, endDate, type, and numberOfDays. The type must be one of: ${PTO_CATEGORIES.join(', ')}. Format your response as a markdown code block with JSON.`;
+        const context = JSON.stringify({
+            records,
+            holidays: HOLIDAYS_2025,
+            currentDate: new Date().toISOString()
+        });
+        
+        const prompt = `Given the following context:
+- PTO records: ${JSON.stringify(records)}
+- Holidays: ${JSON.stringify(HOLIDAYS_2025)}
+- Current date: ${new Date().toISOString()}
+
+User request: ${request}
+
+Parse this request and respond with a JSON object containing:
+- startDate: The start date (YYYY-MM-DD)
+- endDate: The end date (YYYY-MM-DD)
+- type: The PTO type (optional, default to "Paid Time Off")
+- numberOfDays: Number of working days (excluding weekends and holidays)
+- excludedDays: { weekends: true, holidays: true }
+
+Format your response as a markdown code block with JSON.`;
         
         const response = await queryBedrock(prompt);
         let ptoRequest;
@@ -265,15 +283,31 @@ app.post('/api/pto/schedule', async (req, res) => {
             throw new Error('Invalid PTO request format from AI');
         }
 
-        if (!isValidPTOCategory(ptoRequest.type)) {
-            throw new Error('Invalid PTO category. Must be one of: ' + PTO_CATEGORIES.join(', '));
+        // Set default type if not specified or invalid
+        if (!ptoRequest.type || !isValidPTOCategory(ptoRequest.type)) {
+            ptoRequest.type = 'Paid Time Off';
+        }
+
+        // Calculate working days between dates
+        const startDate = new Date(ptoRequest.startDate);
+        const endDate = new Date(ptoRequest.endDate);
+        ptoRequest.numberOfDays = calculateWorkingDays(startDate, endDate);
+        ptoRequest.excludedDays = { weekends: true, holidays: true };
+
+        // Get holiday information
+        const holidays = getHolidaysBetween(startDate, endDate);
+        if (holidays.length > 0) {
+            ptoRequest.holidayInfo = `\nNote: This period includes the following holidays:\n${holidays.map(h => `- ${h.name} (${h.date})`).join('\n')}`;
         }
 
         ptoRequest.id = Date.now().toString();
         ptoRequest.status = 'approved';
         
         await savePTORecord(ptoRequest);
-        res.json({ message: 'PTO scheduled successfully', pto: ptoRequest });
+        res.json({ 
+            message: `PTO scheduled successfully (${ptoRequest.numberOfDays} working day${ptoRequest.numberOfDays > 1 ? 's' : ''})${ptoRequest.holidayInfo || ''}`, 
+            pto: ptoRequest 
+        });
     } catch (error) {
         console.error('API Error:', error);
         res.status(500).json({ error: error.message });
@@ -285,7 +319,7 @@ app.post('/api/pto/query', async (req, res) => {
         const { query } = req.body;
         const records = await getAllPTORecords();
         const context = JSON.stringify(records);
-        const prompt = `Given the following PTO records: ${context}\n\nUser query: ${query}\n\nProvide a natural response about the PTO information. If the response contains any JSON data, format it as a markdown code block.`;
+        const prompt = `Given the following PTO records: ${context}\n\nUser query: ${query}\n\nProvide a natural response about the PTO information. Include specific details about dates, types, and total days when relevant. If the response contains any JSON data, format it as a markdown code block.`;
         
         const response = await queryBedrock(prompt);
         let result;

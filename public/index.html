@@ -146,6 +146,24 @@
             overflow: hidden;
         }
 
+        .calendar-day.weekend {
+            color: #666;
+            background-color: rgba(0, 0, 0, 0.1);
+        }
+
+        .calendar-day.holiday {
+            color: #ff6b6b;
+            font-weight: bold;
+        }
+
+        .calendar-day.holiday::after {
+            content: '🎉';
+            font-size: 0.8rem;
+            position: absolute;
+            top: 2px;
+            right: 2px;
+        }
+
         .calendar-day.pto {
             position: relative;
             overflow: hidden;
@@ -384,6 +402,7 @@
         let conversations = [];
         let ptoRecords = [];
         let currentDate = new Date();
+        let holidays = [];
 
         // Load PTO categories
         async function loadPTOCategories() {
@@ -484,9 +503,24 @@
             for (let day = 1; day <= lastDay.getDate(); day++) {
                 const dayCell = document.createElement('div');
                 dayCell.className = 'calendar-day';
-                dayCell.innerHTML = `<span>${day}</span>`;
-
                 const currentMonthDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                const currentDayDate = new Date(currentMonthDate);
+
+                // Check if weekend
+                const isWeekend = [0, 6].includes(currentDayDate.getDay());
+                if (isWeekend) {
+                    dayCell.classList.add('weekend');
+                }
+
+                // Check if holiday
+                const isHoliday = holidays.some(h => h.date === currentMonthDate);
+                if (isHoliday) {
+                    dayCell.classList.add('holiday');
+                    const holiday = holidays.find(h => h.date === currentMonthDate);
+                    dayCell.title = holiday.name;
+                }
+
+                dayCell.innerHTML = `<span>${day}</span>`;
                 
                 // Check for PTO on this day
                 const ptoForDay = ptoRecords.find(record => {
@@ -496,7 +530,7 @@
                     return current >= start && current <= end;
                 });
 
-                if (ptoForDay) {
+                if (ptoForDay && !isWeekend && !isHoliday) {
                     dayCell.classList.add('pto');
                     dayCell.setAttribute('data-type', ptoForDay.type);
                     dayCell.title = `${ptoForDay.type}: ${ptoForDay.startDate} to ${ptoForDay.endDate}`;
@@ -575,10 +609,6 @@
             const category = ptoCategory.value;
             
             if (!message) return;
-            if (!category && !message.toLowerCase().includes('query')) {
-                addMessage('Please select a PTO category before submitting your request.', false);
-                return;
-            }
 
             userInput.value = '';
             sendButton.disabled = true;
@@ -604,7 +634,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(endpoint === '/api/pto/query' ? 
                         { query: message } : 
-                        { request: `${category} ${message}` }
+                        { request: category ? `${category} ${message}` : message }
                     )
                 });
 
@@ -620,6 +650,7 @@
                         ${data.message}
                         <div class="pto-type">${ptoDetails.type}</div>
                         <pre>${JSON.stringify(ptoDetails, null, 2)}</pre>
+                        ${ptoDetails.holidayInfo || ''}
                     `;
                 } else {
                     responseMessage = data.response;
@@ -644,6 +675,15 @@
             }
         }
 
+        async function loadHolidays() {
+            try {
+                const response = await fetch('/api/pto/holidays');
+                holidays = await response.json();
+            } catch (error) {
+                console.error('Error loading holidays:', error);
+            }
+        }
+
         userInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -655,6 +695,7 @@
 
         // Initialize
         loadPTOCategories();
+        loadHolidays();
         if (calendarPanel.classList.contains('visible')) {
             loadPTORecords();
         }

@@ -1,3 +1,5 @@
+const { isWorkingDay, calculateWorkingDays, getHolidaysBetween, getNextWorkingDay } = require('./holidayUtils');
+
 function getRelativeDate(dateText, currentDate = new Date()) {
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const text = dateText.toLowerCase();
@@ -20,6 +22,11 @@ function getRelativeDate(dateText, currentDate = new Date()) {
         }
         
         result.setDate(result.getDate() + daysToAdd);
+        
+        // If it's a weekend or holiday, get next working day
+        if (!isWorkingDay(result)) {
+            return getNextWorkingDay(result);
+        }
         return result;
     }
 
@@ -27,20 +34,44 @@ function getRelativeDate(dateText, currentDate = new Date()) {
     if (text.includes('tomorrow')) {
         const result = new Date(currentDate);
         result.setDate(result.getDate() + 1);
+        // If tomorrow is not a working day, get next working day
+        if (!isWorkingDay(result)) {
+            return getNextWorkingDay(result);
+        }
         return result;
     }
     if (text.includes('day after tomorrow')) {
         const result = new Date(currentDate);
         result.setDate(result.getDate() + 2);
+        // If day after tomorrow is not a working day, get next working day
+        if (!isWorkingDay(result)) {
+            return getNextWorkingDay(result);
+        }
         return result;
     }
 
     // Handle "in X days"
-    const inDaysMatch = text.match(/in\s+(\d+)\s+days?/);
+    const inDaysMatch = text.match(/in\s+(\d+)\s+(?:business|working)?\s*days?/);
     if (inDaysMatch) {
         const daysToAdd = parseInt(inDaysMatch[1]);
-        const result = new Date(currentDate);
-        result.setDate(result.getDate() + daysToAdd);
+        let result = new Date(currentDate);
+        
+        // If specifically asking for business/working days
+        if (text.includes('business') || text.includes('working')) {
+            let workingDaysAdded = 0;
+            while (workingDaysAdded < daysToAdd) {
+                result.setDate(result.getDate() + 1);
+                if (isWorkingDay(result)) {
+                    workingDaysAdded++;
+                }
+            }
+        } else {
+            result.setDate(result.getDate() + daysToAdd);
+            // If lands on weekend/holiday, get next working day
+            if (!isWorkingDay(result)) {
+                result = getNextWorkingDay(result);
+            }
+        }
         return result;
     }
 
@@ -48,6 +79,10 @@ function getRelativeDate(dateText, currentDate = new Date()) {
     if (text.includes('next week')) {
         const result = new Date(currentDate);
         result.setDate(result.getDate() + 7);
+        // If lands on weekend/holiday, get next working day
+        if (!isWorkingDay(result)) {
+            return getNextWorkingDay(result);
+        }
         return result;
     }
 
@@ -65,20 +100,36 @@ function parseRelativeDateRange(text, currentDate = new Date()) {
         const endDate = getRelativeDate(parts[1], currentDate);
         
         if (startDate && endDate) {
+            // Get holidays between dates
+            const holidays = getHolidaysBetween(startDate, endDate);
+            const holidayInfo = holidays.length > 0 
+                ? `\nNote: This period includes the following holidays:\n${holidays.map(h => `- ${h.name} (${h.date})`).join('\n')}`
+                : '';
+
             return {
                 startDate: formatDate(startDate),
                 endDate: formatDate(endDate),
-                numberOfDays: Math.round((endDate - startDate) / (1000 * 60 * 60 * 24)) + 1
+                numberOfDays: calculateWorkingDays(startDate, endDate),
+                excludedDays: {
+                    weekends: true,
+                    holidays: true
+                },
+                holidayInfo: holidayInfo
             };
         }
     } else {
         // Handle single day
         const date = getRelativeDate(text, currentDate);
         if (date) {
+            const formattedDate = formatDate(date);
             return {
-                startDate: formatDate(date),
-                endDate: formatDate(date),
-                numberOfDays: 1
+                startDate: formattedDate,
+                endDate: formattedDate,
+                numberOfDays: 1,
+                excludedDays: {
+                    weekends: true,
+                    holidays: true
+                }
             };
         }
     }
