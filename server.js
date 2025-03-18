@@ -4,6 +4,8 @@ const bodyParser = require('body-parser');
 const { DynamoDBClient, CreateTableCommand, PutItemCommand, QueryCommand, ScanCommand, UpdateItemCommand } = require("@aws-sdk/client-dynamodb");
 const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-bedrock-runtime");
 const { fromIni } = require("@aws-sdk/credential-provider-ini");
+const { parseRelativeDateRange } = require('./utils/dateUtils');
+const { PTO_CATEGORIES, isValidPTOCategory, extractPTOCategory } = require('./utils/ptoCategories');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -22,7 +24,7 @@ const bedrockClient = new BedrockRuntimeClient(awsConfig);
 const dynamoClient = new DynamoDBClient(awsConfig);
 
 // DynamoDB table name
-const tableName = 'OB-PTORecords-POC';
+const tableName = 'PTORecords';
 
 // Initialize DynamoDB table
 async function initializeDynamoDB() {
@@ -49,6 +51,57 @@ async function initializeDynamoDB() {
         } else {
             console.error('Error creating DynamoDB table:', error);
         }
+    }
+}
+
+// Helper function to interact with Bedrock
+async function queryBedrock(prompt) {
+    const payload = {
+        anthropic_version: "bedrock-2023-05-31",
+        max_tokens: 512,
+        temperature: 0.7,
+        messages: [
+            {
+                role: "user",
+                content: prompt
+            }
+        ]
+    };
+
+    const command = new InvokeModelCommand({
+        modelId: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        body: JSON.stringify(payload),
+        contentType: "application/json",
+        accept: "application/json",
+    });
+
+    try {
+        console.log('Sending request to Bedrock:', { modelId: command.input.modelId, prompt });
+        const response = await bedrockClient.send(command);
+        const rawResponse = new TextDecoder().decode(response.body);
+        console.log('Raw Bedrock response:', rawResponse);
+        
+        try {
+            const responseBody = JSON.parse(rawResponse);
+            console.log('Parsed Bedrock response:', responseBody);
+            
+            if (responseBody.error) {
+                throw new Error(responseBody.error);
+            }
+            
+            return responseBody.messages?.[0]?.content?.[0]?.text || responseBody.content?.[0]?.text || responseBody;
+        } catch (parseError) {
+            console.error('Error parsing Bedrock response:', parseError);
+            throw new Error('Failed to parse Bedrock response: ' + rawResponse);
+        }
+    } catch (error) {
+        console.error('Error calling Bedrock:', {
+            name: error.name,
+            message: error.message,
+            code: error.$metadata?.httpStatusCode,
+            stack: error.stack
+        });
+        throw error;
     }
 }
 
@@ -146,46 +199,6 @@ async function updatePTORecord(id, updates) {
     }
 }
 
-// Initialize DynamoDB on startup
-initializeDynamoDB().catch(console.error);
-
-// Helper function to interact with Bedrock
-async function queryBedrock(prompt) {
-    const payload = {
-        anthropic_version: "bedrock-2023-05-31",
-        max_tokens: 512,
-        temperature: 0.7,
-        messages: [
-            {
-                role: "user",
-                content: prompt
-            }
-        ]
-    };
-
-    const command = new InvokeModelCommand({
-        modelId: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-        body: JSON.stringify(payload),
-        contentType: "application/json",
-        accept: "application/json",
-    });
-
-    try {
-        console.log('Sending request to Bedrock:', { modelId: command.input.modelId, prompt });
-        const response = await bedrockClient.send(command);
-        const responseBody = JSON.parse(new TextDecoder().decode(response.body));
-        console.log('Bedrock response:', responseBody);
-        return responseBody.content[0].text;
-    } catch (error) {
-        console.error('Error calling Bedrock:', {
-            name: error.name,
-            message: error.message,
-            code: error.$metadata?.httpStatusCode
-        });
-        throw error;
-    }
-}
-
 // Helper function to extract JSON from markdown response
 function extractJsonFromResponse(response) {
     const jsonMatch = response.match(/```json\n([\s\S]*?)\n```/);
@@ -205,8 +218,38 @@ app.post('/api/pto/schedule', async (req, res) => {
     try {
         const { request } = req.body;
         const records = await getAllPTORecords();
+        
+        // Extract PTO category from request
+        const category = extractPTOCategory(request);
+        if (!category) {
+            res.status(400).json({ 
+                error: 'Please specify a PTO category: ' + PTO_CATEGORIES.join(', ') 
+            });
+            return;
+        }
+        
+        // First try to parse relative dates from the request
+        const dateRange = parseRelativeDateRange(request, new Date());
+        
+        if (dateRange) {
+            const ptoRequest = {
+                ...dateRange,
+                type: category,
+                id: Date.now().toString(),
+                status: 'approved'
+            };
+            
+            await savePTORecord(ptoRequest);
+            res.json({ 
+                message: 'PTO scheduled successfully', 
+                pto: ptoRequest 
+            });
+            return;
+        }
+        
+        // If relative date parsing fails, fall back to AI
         const context = JSON.stringify(records);
-        const prompt = `Given the following PTO records: ${context}\n\nUser request: ${request}\n\nParse this request and respond with a JSON object containing: startDate, endDate, type, and numberOfDays. Format your response as a markdown code block with JSON.`;
+        const prompt = `Given the following PTO records: ${context}\n\nUser request: ${request}\n\nParse this request and respond with a JSON object containing: startDate, endDate, type, and numberOfDays. The type must be one of: ${PTO_CATEGORIES.join(', ')}. Format your response as a markdown code block with JSON.`;
         
         const response = await queryBedrock(prompt);
         let ptoRequest;
@@ -220,6 +263,10 @@ app.post('/api/pto/schedule', async (req, res) => {
 
         if (!ptoRequest.startDate || !ptoRequest.endDate) {
             throw new Error('Invalid PTO request format from AI');
+        }
+
+        if (!isValidPTOCategory(ptoRequest.type)) {
+            throw new Error('Invalid PTO category. Must be one of: ' + PTO_CATEGORIES.join(', '));
         }
 
         ptoRequest.id = Date.now().toString();
@@ -260,6 +307,25 @@ app.put('/api/pto/update', async (req, res) => {
     try {
         const { request } = req.body;
         const records = await getAllPTORecords();
+        
+        // Try to parse relative dates from the update request
+        const dateRange = parseRelativeDateRange(request, new Date());
+        
+        if (dateRange) {
+            // Find the most recent PTO record to update
+            const recordToUpdate = records[records.length - 1];
+            if (recordToUpdate) {
+                await updatePTORecord(recordToUpdate.id, dateRange);
+                const updatedRecord = { ...recordToUpdate, ...dateRange };
+                res.json({ 
+                    message: 'PTO updated successfully', 
+                    pto: updatedRecord 
+                });
+                return;
+            }
+        }
+        
+        // If relative date parsing fails or no record found, fall back to AI
         const context = JSON.stringify(records);
         const prompt = `Given the following PTO records: ${context}\n\nUpdate request: ${request}\n\nIdentify the PTO to update and provide the new details as JSON. Format your response as a markdown code block with JSON.`;
         
@@ -297,6 +363,10 @@ app.get('/api/pto/list', async (req, res) => {
         console.error('API Error:', error);
         res.status(500).json({ error: error.message });
     }
+});
+
+app.get('/api/pto/categories', (req, res) => {
+    res.json(PTO_CATEGORIES);
 });
 
 app.listen(port, () => {

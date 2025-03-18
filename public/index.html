@@ -12,6 +12,18 @@
             --text-color: #ececf1;
             --border-color: #565869;
             --calendar-highlight: #10a37f33;
+            
+            /* Category Colors */
+            --bereavement-color: #ff6b6b;
+            --fmla-color: #4ecdc4;
+            --jury-color: #45b7d1;
+            --parental-color: #96ceb4;
+            --medical-color: #ff7f50;
+            --military-color: #6c5ce7;
+            --travel-color: #ffd93d;
+            --pto-color: #10a37f;
+            --sick-color: #ff8f94;
+            --unpaid-color: #a8a8a8;
         }
 
         * {
@@ -130,12 +142,72 @@
         .calendar-day {
             padding: 0.5rem;
             border-radius: 4px;
+            position: relative;
+            overflow: hidden;
         }
 
         .calendar-day.pto {
-            background: var(--calendar-highlight);
-            color: var(--primary-color);
+            position: relative;
+            overflow: hidden;
         }
+
+        .calendar-day.pto::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            opacity: 0.2;
+            z-index: 0;
+        }
+
+        .calendar-day.pto[data-type="Bereavement"]::before { background-color: var(--bereavement-color); }
+        .calendar-day.pto[data-type="FMLA"]::before { background-color: var(--fmla-color); }
+        .calendar-day.pto[data-type="Jury Duty"]::before { background-color: var(--jury-color); }
+        .calendar-day.pto[data-type="Maternity/Paternity"]::before { background-color: var(--parental-color); }
+        .calendar-day.pto[data-type="Medical Leave"]::before { background-color: var(--medical-color); }
+        .calendar-day.pto[data-type="Military"]::before { background-color: var(--military-color); }
+        .calendar-day.pto[data-type="Out of Office / Travel"]::before { background-color: var(--travel-color); }
+        .calendar-day.pto[data-type="Paid Time Off"]::before { background-color: var(--pto-color); }
+        .calendar-day.pto[data-type="Sick Day"]::before { background-color: var(--sick-color); }
+        .calendar-day.pto[data-type="Unpaid Time Off"]::before { background-color: var(--unpaid-color); }
+
+        .calendar-day span {
+            position: relative;
+            z-index: 1;
+        }
+
+        .pto-legend {
+            margin-top: 1rem;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 0.5rem;
+        }
+
+        .pto-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+        }
+
+        .pto-legend-color {
+            width: 1rem;
+            height: 1rem;
+            border-radius: 3px;
+        }
+
+        .pto-legend-color[data-type="Bereavement"] { background-color: var(--bereavement-color); }
+        .pto-legend-color[data-type="FMLA"] { background-color: var(--fmla-color); }
+        .pto-legend-color[data-type="Jury Duty"] { background-color: var(--jury-color); }
+        .pto-legend-color[data-type="Maternity/Paternity"] { background-color: var(--parental-color); }
+        .pto-legend-color[data-type="Medical Leave"] { background-color: var(--medical-color); }
+        .pto-legend-color[data-type="Military"] { background-color: var(--military-color); }
+        .pto-legend-color[data-type="Out of Office / Travel"] { background-color: var(--travel-color); }
+        .pto-legend-color[data-type="Paid Time Off"] { background-color: var(--pto-color); }
+        .pto-legend-color[data-type="Sick Day"] { background-color: var(--sick-color); }
+        .pto-legend-color[data-type="Unpaid Time Off"] { background-color: var(--unpaid-color); }
 
         .chat-messages {
             flex: 1;
@@ -175,8 +247,31 @@
             padding: 1rem;
             display: flex;
             gap: 1rem;
-            align-items: center;
+            align-items: flex-start;
             border-top: 1px solid var(--border-color);
+            flex-direction: column;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 1rem;
+            width: 100%;
+            align-items: center;
+        }
+
+        .category-selector {
+            padding: 0.75rem;
+            background-color: var(--chat-background);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            border-radius: 6px;
+            min-width: 200px;
+            cursor: pointer;
+        }
+
+        .category-selector option {
+            background-color: var(--background-color);
+            color: var(--text-color);
         }
 
         input[type="text"] {
@@ -225,6 +320,15 @@
             60% { content: '...'; }
             80%, 100% { content: ''; }
         }
+
+        .pto-type {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            background: var(--primary-color);
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }
     </style>
 </head>
 <body>
@@ -240,13 +344,18 @@
             <div class="chat-messages" id="chatMessages">
                 <div class="message assistant">
                     <div class="message-content">
-                        Hello! I'm your AI PTO Manager. I can help you schedule, update, or query your PTO days. How can I assist you today?
+                        Hello! I'm your AI PTO Manager. I can help you schedule, update, or query your PTO days. Please select a PTO category and describe your request.
                     </div>
                 </div>
             </div>
             <div class="input-container">
-                <input type="text" id="userInput" placeholder="Type your request here..." />
-                <button id="sendButton">Send</button>
+                <div class="input-row">
+                    <select class="category-selector" id="ptoCategory">
+                        <option value="">Select PTO Category</option>
+                    </select>
+                    <input type="text" id="userInput" placeholder="Type your request here..." />
+                    <button id="sendButton">Send</button>
+                </div>
             </div>
         </div>
         <div class="calendar-panel" id="calendarPanel">
@@ -271,9 +380,26 @@
         const chatMessages = document.getElementById('chatMessages');
         const historyPanel = document.getElementById('historyPanel');
         const calendarPanel = document.getElementById('calendarPanel');
+        const ptoCategory = document.getElementById('ptoCategory');
         let conversations = [];
         let ptoRecords = [];
         let currentDate = new Date();
+
+        // Load PTO categories
+        async function loadPTOCategories() {
+            try {
+                const response = await fetch('/api/pto/categories');
+                const categories = await response.json();
+                categories.forEach(category => {
+                    const option = document.createElement('option');
+                    option.value = category;
+                    option.textContent = category;
+                    ptoCategory.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading PTO categories:', error);
+            }
+        }
 
         function toggleCalendar() {
             calendarPanel.classList.toggle('visible');
@@ -307,7 +433,7 @@
             `;
             historyItem.onclick = () => {
                 chatMessages.innerHTML = '';
-                addMessage('Hello! I\'m your AI PTO Manager. I can help you schedule, update, or query your PTO days. How can I assist you today?', false);
+                addMessage('Hello! I\'m your AI PTO Manager. I can help you schedule, update, or query your PTO days. Please select a PTO category and describe your request.', false);
                 addMessage(conversation.userMessage, true);
                 addMessage(conversation.response, false);
             };
@@ -340,7 +466,7 @@
             ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(day => {
                 const dayHeader = document.createElement('div');
                 dayHeader.className = 'calendar-day';
-                dayHeader.textContent = day;
+                dayHeader.innerHTML = `<span>${day}</span>`;
                 grid.appendChild(dayHeader);
             });
 
@@ -358,21 +484,47 @@
             for (let day = 1; day <= lastDay.getDate(); day++) {
                 const dayCell = document.createElement('div');
                 dayCell.className = 'calendar-day';
-                dayCell.textContent = day;
+                dayCell.innerHTML = `<span>${day}</span>`;
 
                 const currentMonthDate = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
                 
-                if (ptoRecords.some(record => {
+                // Check for PTO on this day
+                const ptoForDay = ptoRecords.find(record => {
                     const start = new Date(record.startDate);
                     const end = new Date(record.endDate);
                     const current = new Date(currentMonthDate);
                     return current >= start && current <= end;
-                })) {
+                });
+
+                if (ptoForDay) {
                     dayCell.classList.add('pto');
+                    dayCell.setAttribute('data-type', ptoForDay.type);
+                    dayCell.title = `${ptoForDay.type}: ${ptoForDay.startDate} to ${ptoForDay.endDate}`;
                 }
 
                 grid.appendChild(dayCell);
             }
+
+            // Add PTO type legend
+            const legend = document.createElement('div');
+            legend.className = 'pto-legend';
+            const categories = [
+                'Bereavement', 'FMLA', 'Jury Duty', 'Maternity/Paternity',
+                'Medical Leave', 'Military', 'Out of Office / Travel',
+                'Paid Time Off', 'Sick Day', 'Unpaid Time Off'
+            ];
+
+            categories.forEach(category => {
+                const item = document.createElement('div');
+                item.className = 'pto-legend-item';
+                item.innerHTML = `
+                    <div class="pto-legend-color" data-type="${category}"></div>
+                    <span>${category}</span>
+                `;
+                legend.appendChild(item);
+            });
+
+            grid.parentElement.appendChild(legend);
         }
 
         function updatePTOSummary() {
@@ -420,11 +572,19 @@
 
         async function handleUserInput() {
             const message = userInput.value.trim();
+            const category = ptoCategory.value;
+            
             if (!message) return;
+            if (!category && !message.toLowerCase().includes('query')) {
+                addMessage('Please select a PTO category before submitting your request.', false);
+                return;
+            }
 
             userInput.value = '';
             sendButton.disabled = true;
-            addMessage(message, true);
+            
+            const displayMessage = category ? `[${category}] ${message}` : message;
+            addMessage(displayMessage, true);
             
             const loadingMessage = document.createElement('div');
             loadingMessage.className = 'message assistant';
@@ -442,7 +602,10 @@
                 const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(endpoint === '/api/pto/query' ? { query: message } : { request: message })
+                    body: JSON.stringify(endpoint === '/api/pto/query' ? 
+                        { query: message } : 
+                        { request: `${category} ${message}` }
+                    )
                 });
 
                 const data = await response.json();
@@ -452,17 +615,26 @@
                 if (data.error) {
                     responseMessage = `Error: ${data.error}`;
                 } else if (data.message) {
-                    responseMessage = `${data.message}\n\n<pre>${JSON.stringify(data.pto, null, 2)}</pre>`;
+                    const ptoDetails = data.pto;
+                    responseMessage = `
+                        ${data.message}
+                        <div class="pto-type">${ptoDetails.type}</div>
+                        <pre>${JSON.stringify(ptoDetails, null, 2)}</pre>
+                    `;
                 } else {
                     responseMessage = data.response;
                 }
 
                 addMessage(responseMessage, false);
-                updateHistory(message, responseMessage);
+                updateHistory(displayMessage, responseMessage);
                 
-                // Refresh calendar if visible
                 if (calendarPanel.classList.contains('visible')) {
                     loadPTORecords();
+                }
+
+                // Reset category selector for next request
+                if (endpoint !== '/api/pto/query') {
+                    ptoCategory.value = '';
                 }
             } catch (error) {
                 chatMessages.removeChild(loadingMessage);
@@ -481,7 +653,8 @@
 
         sendButton.addEventListener('click', handleUserInput);
 
-        // Initialize calendar if visible
+        // Initialize
+        loadPTOCategories();
         if (calendarPanel.classList.contains('visible')) {
             loadPTORecords();
         }
