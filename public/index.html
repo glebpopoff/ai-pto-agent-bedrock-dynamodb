@@ -393,12 +393,14 @@
         </div>
     </div>
     <script>
+        // Generate a unique session ID
+        const sessionId = 'session_' + Date.now();
         const userInput = document.getElementById('userInput');
         const sendButton = document.getElementById('sendButton');
         const chatMessages = document.getElementById('chatMessages');
-        const historyPanel = document.getElementById('historyPanel');
-        const calendarPanel = document.getElementById('calendarPanel');
         const ptoCategory = document.getElementById('ptoCategory');
+        const calendarToggle = document.getElementById('calendarToggle');
+        const calendarPanel = document.getElementById('calendarPanel');
         let conversations = [];
         let ptoRecords = [];
         let currentDate = new Date();
@@ -632,10 +634,11 @@
                 const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(endpoint === '/api/pto/query' ? 
-                        { query: message } : 
-                        { request: category ? `${category} ${message}` : message }
-                    )
+                    body: JSON.stringify({
+                        query: message,
+                        request: category ? `${category} ${message}` : message,
+                        sessionId
+                    })
                 });
 
                 const data = await response.json();
