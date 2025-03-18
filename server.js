@@ -1,7 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const { BedrockRuntimeClient, InvokeModelCommand } = require('@aws-sdk/client-bedrock-runtime');
+const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-bedrock-runtime");
+const { fromIni } = require("@aws-sdk/credential-provider-ini");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -12,6 +14,14 @@ app.use(bodyParser.json());
 // Initialize AWS Bedrock client
 const bedrockClient = new BedrockRuntimeClient({
     region: process.env.AWS_REGION || 'us-east-1',
+    credentials: fromIni({ profile: "openbook" })
+});
+
+
+
+const dynomoClient = new DynamoDBClient({
+  region: "us-east-1",
+  credentials: fromIni({ profile: "openbook" })
 });
 
 // In-memory storage for PTO records (replace with database in production)
@@ -20,25 +30,36 @@ let ptoRecords = [];
 // Helper function to interact with Bedrock
 async function queryBedrock(prompt) {
     const payload = {
-        prompt: `\n\nHuman: ${prompt}\n\nAssistant:`,
+        anthropic_version: "bedrock-2023-05-31",
         max_tokens: 512,
         temperature: 0.7,
-        stop_sequences: ["\n\nHuman:"]
+        messages: [
+            {
+                role: "user",
+                content: prompt
+            }
+        ]
     };
 
     const command = new InvokeModelCommand({
-        modelId: "anthropic.claude-v2",
+        modelId: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
         body: JSON.stringify(payload),
         contentType: "application/json",
         accept: "application/json",
     });
 
     try {
+        console.log('Sending request to Bedrock:', { modelId: command.input.modelId, prompt });
         const response = await bedrockClient.send(command);
         const responseBody = JSON.parse(new TextDecoder().decode(response.body));
-        return responseBody.completion;
+        console.log('Bedrock response:', responseBody);
+        return responseBody.content[0].text;
     } catch (error) {
-        console.error('Error calling Bedrock:', error);
+        console.error('Error calling Bedrock:', {
+            name: error.name,
+            message: error.message,
+            code: error.$metadata?.httpStatusCode
+        });
         throw error;
     }
 }
