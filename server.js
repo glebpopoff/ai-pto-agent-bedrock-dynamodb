@@ -17,7 +17,7 @@ app.use(bodyParser.json());
 // AWS configuration
 const awsConfig = {
     region: process.env.AWS_REGION || 'us-east-1',
-    credentials: fromIni({ profile: "openbook" })
+    credentials: fromIni({ profile: process.env.AWS_PROFILE || "my-profile" })
 };
 
 // Initialize AWS clients
@@ -25,7 +25,7 @@ const bedrockClient = new BedrockRuntimeClient(awsConfig);
 const dynamoClient = new DynamoDBClient(awsConfig);
 
 // DynamoDB table name
-const tableName = 'PTORecords';
+const tableName = process.env.DYNAMODB_TABLE_NAME || 'My-DynamoDB-Table';
 
 // Initialize conversation history storage
 const conversationHistory = new Map();
@@ -96,7 +96,7 @@ async function queryBedrock(prompt, sessionId = 'default', includeHistory = true
     };
 
     const command = new InvokeModelCommand({
-        modelId: "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        modelId: process.env.BEDROCK_MODEL_ID ||  "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
         body: JSON.stringify(payload),
         contentType: "application/json",
         accept: "application/json",
