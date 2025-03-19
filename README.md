@@ -107,6 +107,47 @@ The AI PTO Manager provides an intuitive chat interface for managing PTO request
 }
 ```
 
+## Storage Configuration
+
+The application supports two storage backends:
+1. DynamoDB (default)
+2. External API
+
+To configure the storage backend, modify `config/storage.js`:
+
+```javascript
+module.exports = {
+    storage: {
+        // Set to true to use external API, false for DynamoDB
+        useExternalApi: false,
+        
+        // External API configuration
+        api: {
+            baseUrl: process.env.EXTERNAL_API_URL || 'https://api.example.com/pto',
+            endpoints: {
+                create: '/records',
+                read: '/records/:id',
+                update: '/records/:id',
+                delete: '/records/:id',
+                list: '/records'
+            }
+        },
+
+        // DynamoDB configuration
+        dynamodb: {
+            tableName: process.env.DYNAMODB_TABLE_NAME || 'PTORecords',
+            region: process.env.AWS_REGION || 'us-east-1'
+        }
+    }
+};
+```
+
+### Environment Variables
+
+When using the external API, set these additional environment variables:
+- `EXTERNAL_API_URL`: Base URL for the external PTO API
+- `EXTERNAL_API_KEY`: Authentication key for the external API
+
 ## Setup
 1. Install dependencies:
 ```bash

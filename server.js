@@ -1,34 +1,33 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const { DynamoDBClient, CreateTableCommand, PutItemCommand, QueryCommand, ScanCommand, UpdateItemCommand } = require("@aws-sdk/client-dynamodb");
 const { BedrockRuntimeClient, InvokeModelCommand } = require("@aws-sdk/client-bedrock-runtime");
-const { fromIni } = require("@aws-sdk/credential-provider-ini");
-const { parseRelativeDateRange } = require('./utils/dateUtils');
+const StorageFactory = require('./storage/StorageFactory');
+const config = require('./config/storage').storage;
 const { PTO_CATEGORIES, isValidPTOCategory, extractPTOCategory } = require('./utils/ptoCategories');
 const { HOLIDAYS_2025, isWorkingDay, calculateWorkingDays, getHolidaysBetween } = require('./utils/holidayUtils');
+const { parseRelativeDateRange } = require('./utils/dateUtils');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Initialize AWS Bedrock client
+const bedrockClient = new BedrockRuntimeClient({
+    region: process.env.AWS_REGION || 'us-east-1'
+});
+
+// Initialize storage adapter
+const storage = StorageFactory.createStorage();
+
+// Middleware
 app.use(express.static('public'));
 app.use(bodyParser.json());
 
-// AWS configuration
-const awsConfig = {
-    region: process.env.AWS_REGION || 'us-east-1',
-    credentials: fromIni({ profile: process.env.AWS_PROFILE || "my-profile" })
-};
-
-// Initialize AWS clients
-const bedrockClient = new BedrockRuntimeClient(awsConfig);
-const dynamoClient = new DynamoDBClient(awsConfig);
-
-// DynamoDB table name
-const tableName = process.env.DYNAMODB_TABLE_NAME || 'My-DynamoDB-Table';
-
-// Initialize conversation history storage
-const conversationHistory = new Map();
+// Error handler middleware
+app.use((err, req, res, next) => {
+    console.error('API Error:', err);
+    res.status(500).json({ error: err.message });
+});
 
 // Helper function to get conversation history
 function getConversationHistory(sessionId, maxMessages = 5) {
@@ -46,32 +45,21 @@ function addToConversationHistory(sessionId, role, content) {
     conversationHistory.get(sessionId).push({ role, content });
 }
 
-// Initialize DynamoDB table
-async function initializeDynamoDB() {
-    try {
-        const createTableCommand = new CreateTableCommand({
-            TableName: tableName,
-            KeySchema: [
-                { AttributeName: 'id', KeyType: 'HASH' }
-            ],
-            AttributeDefinitions: [
-                { AttributeName: 'id', AttributeType: 'S' }
-            ],
-            ProvisionedThroughput: {
-                ReadCapacityUnits: 5,
-                WriteCapacityUnits: 5
-            }
-        });
+// Initialize conversation history storage
+const conversationHistory = new Map();
 
-        await dynamoClient.send(createTableCommand);
-        console.log('DynamoDB table created successfully');
-    } catch (error) {
-        if (error.name === 'ResourceInUseException') {
-            console.log('DynamoDB table already exists');
-        } else {
-            console.error('Error creating DynamoDB table:', error);
+// Helper function to extract JSON from markdown response
+function extractJsonFromResponse(response) {
+    const jsonMatch = response.match(/```json\n([\s\S]*?)\n```/);
+    if (jsonMatch && jsonMatch[1]) {
+        try {
+            return JSON.parse(jsonMatch[1]);
+        } catch (error) {
+            console.error('Error parsing extracted JSON:', error);
+            throw new Error('Failed to parse JSON from response');
         }
     }
+    throw new Error('No JSON found in response');
 }
 
 // Helper function to interact with Bedrock
@@ -90,13 +78,12 @@ async function queryBedrock(prompt, sessionId = 'default', includeHistory = true
 
     const payload = {
         anthropic_version: "bedrock-2023-05-31",
-        max_tokens: 512,
-        temperature: 0.7,
+        max_tokens: 1024,
         messages: messages
     };
 
     const command = new InvokeModelCommand({
-        modelId: process.env.BEDROCK_MODEL_ID ||  "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        modelId: process.env.BEDROCK_MODEL_ID || "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
         body: JSON.stringify(payload),
         contentType: "application/json",
         accept: "application/json",
@@ -118,123 +105,47 @@ async function queryBedrock(prompt, sessionId = 'default', includeHistory = true
     }
 }
 
-// DynamoDB operations
-async function savePTORecord(ptoRecord) {
+// Routes
+app.post('/api/chat', async (req, res) => {
     try {
-        const command = new PutItemCommand({
-            TableName: tableName,
-            Item: {
-                id: { S: ptoRecord.id },
-                startDate: { S: ptoRecord.startDate },
-                endDate: { S: ptoRecord.endDate },
-                type: { S: ptoRecord.type },
-                numberOfDays: { N: ptoRecord.numberOfDays.toString() },
-                status: { S: ptoRecord.status }
-            }
+        const { message, context, sessionId = 'default' } = req.body;
+
+        // Get existing PTO records for context
+        const ptoRecords = await storage.listPTORecords();
+
+        const payload = {
+            anthropic_version: "bedrock-2023-05-31",
+            max_tokens: 1024,
+            messages: [{
+                role: "user",
+                content: `You are an AI PTO Manager. Current date is ${new Date().toISOString()}. 
+                         Existing PTO records: ${JSON.stringify(ptoRecords)}. 
+                         Previous context: ${JSON.stringify(context)}. 
+                         User request: ${message}`
+            }]
+        };
+
+        const command = new InvokeModelCommand({
+            modelId: process.env.BEDROCK_MODEL_ID || "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+            body: JSON.stringify(payload),
+            contentType: "application/json",
+            accept: "application/json",
         });
 
-        await dynamoClient.send(command);
+        const response = await bedrockClient.send(command);
+        const responseData = JSON.parse(new TextDecoder().decode(response.body));
+
+        res.json(responseData);
     } catch (error) {
-        console.error('Error saving PTO record:', error);
-        if (error.name === 'ResourceNotFoundException') {
-            console.log('Table not found, creating...');
-            await initializeDynamoDB();
-            // Retry the save operation
-            await dynamoClient.send(command);
-        } else {
-            throw error;
-        }
+        console.error('API Error:', error);
+        res.status(500).json({ error: error.message });
     }
-}
-
-async function getAllPTORecords() {
-    try {
-        const command = new ScanCommand({
-            TableName: tableName
-        });
-
-        const response = await dynamoClient.send(command);
-        return (response.Items || []).map(item => ({
-            id: item.id.S,
-            startDate: item.startDate.S,
-            endDate: item.endDate.S,
-            type: item.type.S,
-            numberOfDays: parseInt(item.numberOfDays.N),
-            status: item.status.S
-        }));
-    } catch (error) {
-        console.error('Error getting PTO records:', error);
-        if (error.name === 'ResourceNotFoundException') {
-            console.log('Table not found, creating...');
-            await initializeDynamoDB();
-            return [];
-        }
-        throw error;
-    }
-}
-
-async function updatePTORecord(id, updates) {
-    try {
-        const updateExpressions = [];
-        const expressionAttributeNames = {};
-        const expressionAttributeValues = {};
-        
-        Object.entries(updates).forEach(([key, value]) => {
-            if (key !== 'id') {
-                updateExpressions.push(`#${key} = :${key}`);
-                expressionAttributeNames[`#${key}`] = key;
-                expressionAttributeValues[`:${key}`] = 
-                    typeof value === 'number' ? { N: value.toString() } :
-                    typeof value === 'boolean' ? { BOOL: value } :
-                    { S: value };
-            }
-        });
-
-        const command = new UpdateItemCommand({
-            TableName: tableName,
-            Key: { id: { S: id } },
-            UpdateExpression: `SET ${updateExpressions.join(', ')}`,
-            ExpressionAttributeNames: expressionAttributeNames,
-            ExpressionAttributeValues: expressionAttributeValues
-        });
-
-        await dynamoClient.send(command);
-    } catch (error) {
-        console.error('Error updating PTO record:', error);
-        if (error.name === 'ResourceNotFoundException') {
-            console.log('Table not found, creating...');
-            await initializeDynamoDB();
-            // Retry the update operation
-            await dynamoClient.send(command);
-        } else {
-            throw error;
-        }
-    }
-}
-
-// Helper function to extract JSON from markdown response
-function extractJsonFromResponse(response) {
-    const jsonMatch = response.match(/```json\n([\s\S]*?)\n```/);
-    if (jsonMatch && jsonMatch[1]) {
-        try {
-            return JSON.parse(jsonMatch[1]);
-        } catch (error) {
-            console.error('Error parsing extracted JSON:', error);
-            throw new Error('Failed to parse JSON from response');
-        }
-    }
-    throw new Error('No JSON found in response');
-}
-
-// API Endpoints
-app.get('/api/pto/holidays', (req, res) => {
-    res.json(HOLIDAYS_2025);
 });
 
 app.post('/api/pto/schedule', async (req, res) => {
     try {
         const { request, sessionId = 'default' } = req.body;
-        const records = await getAllPTORecords();
+        const records = await storage.listPTORecords();
         
         // Add user's request to conversation history
         addToConversationHistory(sessionId, "user", request);
@@ -253,7 +164,7 @@ app.post('/api/pto/schedule', async (req, res) => {
                 status: 'approved'
             };
             
-            await savePTORecord(ptoRequest);
+            await storage.createPTORecord(ptoRequest);
             const response = `PTO scheduled successfully (${ptoRequest.numberOfDays} working day${ptoRequest.numberOfDays > 1 ? 's' : ''})${dateRange.holidayInfo || ''}`;
             
             // Add system's response to conversation history
@@ -327,7 +238,7 @@ Format your response as a markdown code block with JSON.`;
         ptoRequest.id = Date.now().toString();
         ptoRequest.status = 'approved';
         
-        await savePTORecord(ptoRequest);
+        await storage.createPTORecord(ptoRequest);
         const successResponse = `PTO scheduled successfully (${ptoRequest.numberOfDays} working day${ptoRequest.numberOfDays > 1 ? 's' : ''})${ptoRequest.holidayInfo || ''}`;
         
         // Add system's response to conversation history
@@ -346,7 +257,7 @@ Format your response as a markdown code block with JSON.`;
 app.post('/api/pto/query', async (req, res) => {
     try {
         const { query, sessionId = 'default' } = req.body;
-        const records = await getAllPTORecords();
+        const records = await storage.listPTORecords();
         
         // Add user's query to conversation history
         addToConversationHistory(sessionId, "user", query);
@@ -387,7 +298,7 @@ Provide a natural response about the PTO information, considering the conversati
 app.put('/api/pto/update', async (req, res) => {
     try {
         const { request, sessionId = 'default' } = req.body;
-        const records = await getAllPTORecords();
+        const records = await storage.listPTORecords();
         
         // Add user's update request to conversation history
         addToConversationHistory(sessionId, "user", request);
@@ -399,7 +310,7 @@ app.put('/api/pto/update', async (req, res) => {
             // Find the most recent PTO record to update
             const recordToUpdate = records[records.length - 1];
             if (recordToUpdate) {
-                await updatePTORecord(recordToUpdate.id, dateRange);
+                await storage.updatePTORecord(recordToUpdate.id, dateRange);
                 const updatedRecord = { ...recordToUpdate, ...dateRange };
                 const response = `PTO updated successfully`;
                 
@@ -446,7 +357,7 @@ Identify the PTO to update and provide the new details as JSON. Format your resp
             record.startDate === updateDetails.originalStartDate);
 
         if (recordToUpdate) {
-            await updatePTORecord(recordToUpdate.id, updateDetails.newDetails);
+            await storage.updatePTORecord(recordToUpdate.id, updateDetails.newDetails);
             const updatedRecord = { ...recordToUpdate, ...updateDetails.newDetails };
             const successResponse = `PTO updated successfully`;
             
@@ -468,7 +379,7 @@ Identify the PTO to update and provide the new details as JSON. Format your resp
 
 app.get('/api/pto/list', async (req, res) => {
     try {
-        const records = await getAllPTORecords();
+        const records = await storage.listPTORecords();
         res.json(records);
     } catch (error) {
         console.error('API Error:', error);
@@ -480,6 +391,14 @@ app.get('/api/pto/categories', (req, res) => {
     res.json(PTO_CATEGORIES);
 });
 
+app.get('/api/pto/holidays', (req, res) => {
+    res.json(HOLIDAYS_2025);
+});
+
+// Start server
 app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
+    
+    // Log storage adapter type
+    console.log(`Using ${config.useExternalApi ? 'External API' : 'DynamoDB'} storage adapter`);
 });
