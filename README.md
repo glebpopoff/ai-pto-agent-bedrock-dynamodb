@@ -16,12 +16,97 @@ The AI PTO Manager provides an intuitive chat interface for managing PTO request
 - DynamoDB for persistent storage
 - Real-time UI updates
 
+## PTO Management
+
+### Categories
+
+The application supports various PTO categories, each with its own color coding in the UI:
+
+```javascript
+const PTO_CATEGORIES = {
+    vacation: "Vacation Days",
+    sick: "Sick Leave",
+    personal: "Personal Days",
+    bereavement: "Bereavement Leave",
+    jury: "Jury Duty",
+    parental: "Parental Leave"
+};
+```
+
+### Calendar Integration
+
+The application includes a built-in calendar system that:
+- Displays PTO days with category-specific colors
+- Marks holidays and weekends
+- Calculates working days (excluding holidays and weekends)
+- Supports date ranges and relative dates (e.g., "next week", "this Friday")
+
+#### 2025 Holiday Calendar
+
+The application includes a predefined holiday calendar for 2025. Holidays are automatically considered when calculating working days for PTO requests.
+
+Access the holiday calendar via:
+```
+GET /api/pto/holidays
+```
+
+### Natural Language Processing
+
+The application uses AWS Bedrock (Claude v3 Sonnet) to understand natural language PTO requests such as:
+- "I need vacation days for next week"
+- "Schedule sick leave for tomorrow"
+- "Take personal time off from March 20 to March 22"
+- "Cancel my PTO for next Friday"
+
+The AI model:
+1. Extracts dates from relative references
+2. Identifies PTO categories
+3. Calculates working days
+4. Considers holidays and weekends
+5. Maintains conversation context
+
+### Conversation Management
+
+The application maintains conversation history to provide context-aware responses:
+
+1. **Session Management**
+   - Each user interaction is tracked by session ID
+   - Maintains recent conversation history
+   - Provides context for follow-up requests
+
+2. **Context Handling**
+   - Tracks recent PTO requests and updates
+   - Maintains reference to current date (2025-03-19)
+   - Preserves category selections
+   - Remembers date ranges discussed
+
+Example conversation flow:
+```
+User: "I need vacation days for next week"
+AI: "I'll help you schedule vacation days. How many days would you like to take?"
+
+User: "Monday through Wednesday"
+AI: "Based on our conversation, I'll schedule vacation days for March 24-26, 2025 
+    (3 working days). Would you like me to confirm this PTO request?"
+```
+
+3. **Date Processing**
+   - Handles relative date references
+   - Considers working days only
+   - Accounts for holidays and weekends
+   - Validates date ranges
+
+4. **PTO Categories**
+   - Maintains selected category context
+   - Validates category changes
+   - Preserves category preferences
+
 ## Technical Stack
 - **Frontend**: HTML, CSS, JavaScript (vanilla)
 - **Backend**: Node.js with Express
-- **AI**: AWS Bedrock with Claude 3 Sonnet (us.anthropic.claude-3-7-sonnet-20250219-v1:0)
-- **Storage**: AWS DynamoDB
-- **Authentication**: AWS IAM using my-app-profile profile
+- **AI**: AWS Bedrock (Claude v3 Sonnet)
+- **Storage**: AWS DynamoDB (default) or External API
+- **Authentication**: AWS IAM using my-app-profile
 
 ## Requirements
 - Node.js (v21.7.3 or higher)
@@ -78,7 +163,61 @@ The AI PTO Manager provides an intuitive chat interface for managing PTO request
   - Error handling
   - Detailed logging
 
+### DynamoDB Schema
+
+When using DynamoDB storage, the following table structure is used:
+
+**Table Name:** `PTORecords` (configurable via `DYNAMODB_TABLE_NAME`)
+
+**Schema:**
+- Primary Key: `id` (String)
+- Attributes:
+  - `startDate` (String): Start date of PTO
+  - `endDate` (String): End date of PTO
+  - `type` (String): PTO category
+  - `numberOfDays` (Number): Number of working days
+  - `status` (String): PTO status (e.g., 'approved')
+
+The table is automatically created if it doesn't exist when the application starts.
+
+**Example Record:**
+```json
+{
+    "id": "1647889012345",
+    "startDate": "2025-03-20",
+    "endDate": "2025-03-21",
+    "type": "vacation",
+    "numberOfDays": 2,
+    "status": "approved"
+}
+```
+
 ### AWS Configuration
+
+### Required Settings
+
+1. **AWS Bedrock Model ID**
+   ```
+   BEDROCK_MODEL_ID=us.anthropic.claude-3-7-sonnet-20250219-v1:0
+   ```
+   This specific model ID is required and must not be changed.
+
+2. **AWS Profile**
+   ```
+   AWS_PROFILE=my-app-profile
+   ```
+   The application must use the `my-app-profile` AWS credentials profile.
+
+3. **AWS Region**
+   ```
+   AWS_REGION=us-east-1
+   ```
+   Default region for AWS services (Bedrock and DynamoDB).
+
+### AWS IAM Policy
+
+The following IAM policy should be attached to the `my-app-profile` credentials:
+
 ```json
 {
     "Version": "2012-10-17",
@@ -88,7 +227,7 @@ The AI PTO Manager provides an intuitive chat interface for managing PTO request
             "Action": [
                 "bedrock:InvokeModel"
             ],
-            "Resource": "arn:aws:bedrock:*:*:model/anthropic.claude-*"
+            "Resource": "arn:aws:bedrock:*:*:model/anthropic.claude-3-7-sonnet-20250219-v1:0"
         },
         {
             "Effect": "Allow",
@@ -107,11 +246,115 @@ The AI PTO Manager provides an intuitive chat interface for managing PTO request
 }
 ```
 
+Note: The Bedrock model ARN specifically allows only the required Claude v3 Sonnet model.
+
+### AWS Services
+
+1. **AWS Bedrock**
+   - Natural language processing for PTO requests
+   - Uses Claude v3 Sonnet model (specific version required)
+   - Handles request interpretation and response generation
+
+2. **AWS DynamoDB** (when using default storage)
+   - Stores PTO records with automatic table creation
+   - Uses IAM authentication via my-app-profile
+   - Includes retry logic and error handling
+   - Auto-converts attribute types
+
+## Architecture
+
+The AI PTO Manager uses a modular architecture with the following components:
+
+```mermaid
+graph TD
+    FE[Frontend] --> |HTTP| BE[Backend Server]
+    BE --> |Natural Language| AI[AWS Bedrock]
+    BE --> SF[Storage Factory]
+    SF --> |Config Based| DB[DynamoDB Storage]
+    SF --> |Config Based| API[External API Storage]
+    
+    subgraph "Storage Layer"
+        SF
+        DB
+        API
+    end
+```
+
+### Storage Adapter Pattern
+
+The application implements a flexible storage adapter pattern that allows switching between different storage backends:
+
+```mermaid
+classDiagram
+    class StorageAdapter {
+        <<interface>>
+        +createPTORecord(record)
+        +getPTORecord(id)
+        +updatePTORecord(id, record)
+        +deletePTORecord(id)
+        +listPTORecords()
+    }
+    
+    class DynamoDBAdapter {
+        -client: DynamoDBClient
+        -docClient: DynamoDBDocumentClient
+        -tableName: string
+        +createPTORecord(record)
+        +getPTORecord(id)
+        +updatePTORecord(id, record)
+        +deletePTORecord(id)
+        +listPTORecords()
+    }
+    
+    class ExternalAPIAdapter {
+        -config: object
+        -baseUrl: string
+        -headers: object
+        +createPTORecord(record)
+        +getPTORecord(id)
+        +updatePTORecord(id, record)
+        +deletePTORecord(id)
+        +listPTORecords()
+    }
+    
+    class StorageFactory {
+        +createStorage(): StorageAdapter
+    }
+    
+    StorageAdapter <|-- DynamoDBAdapter
+    StorageAdapter <|-- ExternalAPIAdapter
+    StorageFactory --> StorageAdapter
+```
+
+### Components
+
+1. **Frontend**: Static HTML/CSS/JS interface with a ChatGPT-like design
+2. **Backend Server**: Node.js/Express server handling API requests
+3. **AWS Bedrock**: AI service using Claude v3 Sonnet for natural language processing
+4. **Storage Layer**: 
+   - Storage Factory: Creates appropriate storage adapter based on configuration
+   - DynamoDB Adapter: AWS DynamoDB implementation (default)
+   - External API Adapter: REST API implementation for third-party storage
+
 ## Storage Configuration
 
-The application supports two storage backends:
-1. DynamoDB (default)
-2. External API
+The application uses a flexible storage adapter pattern that allows seamless switching between different storage backends without modifying the application code.
+
+### Available Storage Backends
+
+1. **DynamoDB (Default)**
+   - AWS DynamoDB for persistent storage
+   - Auto-creates tables if they don't exist
+   - Uses AWS IAM for authentication
+   - Configured via AWS credentials profile
+
+2. **External API**
+   - REST API implementation for third-party storage
+   - Supports standard CRUD operations
+   - Uses Bearer token authentication
+   - Configurable endpoints and headers
+
+### Configuration
 
 To configure the storage backend, modify `config/storage.js`:
 
@@ -130,6 +373,10 @@ module.exports = {
                 update: '/records/:id',
                 delete: '/records/:id',
                 list: '/records'
+            },
+            headers: {
+                'Authorization': `Bearer ${process.env.EXTERNAL_API_KEY || ''}`,
+                'Content-Type': 'application/json'
             }
         },
 
@@ -144,9 +391,107 @@ module.exports = {
 
 ### Environment Variables
 
-When using the external API, set these additional environment variables:
+#### Required Settings
+
+1. **AWS Bedrock Model ID**
+   ```
+   BEDROCK_MODEL_ID=us.anthropic.claude-3-7-sonnet-20250219-v1:0
+   ```
+   This specific model ID is required and must not be changed.
+
+2. **AWS Profile**
+   ```
+   AWS_PROFILE=my-app-profile
+   ```
+   The application must use the `my-app-profile` AWS credentials profile.
+
+3. **AWS Region**
+   ```
+   AWS_REGION=us-east-1
+   ```
+   Default region for AWS services (Bedrock and DynamoDB).
+
+#### DynamoDB Configuration (Default)
+- `DYNAMODB_TABLE_NAME`: DynamoDB table name (default: PTORecords)
+
+#### External API Configuration
 - `EXTERNAL_API_URL`: Base URL for the external PTO API
 - `EXTERNAL_API_KEY`: Authentication key for the external API
+
+#### Common Variables
+- `PORT`: Server port (default: 3000)
+
+### Storage Implementation
+
+The storage layer is implemented using the adapter pattern with the following components:
+
+1. **StorageAdapter** (Interface)
+   - Defines common CRUD operations for PTO records
+   - Ensures consistent interface across storage implementations
+
+2. **DynamoDBAdapter**
+   - Implements AWS DynamoDB storage
+   - Handles table creation and management
+   - Uses AWS SDK v3 for better performance
+
+3. **ExternalAPIAdapter**
+   - Implements REST API storage
+   - Handles HTTP requests and responses
+   - Supports custom endpoints and authentication
+
+4. **StorageFactory**
+   - Creates appropriate storage adapter based on configuration
+   - Provides single point of access for storage operations
+
+## Error Handling
+
+The application includes robust error handling for storage operations:
+
+#### DynamoDB Storage
+1. **Table Management**
+   - Auto-creates table if not found during operations
+   - Waits for table to be active before retrying operations
+   - Handles `ResourceNotFoundException` gracefully
+
+2. **Data Operations**
+   - Proper type conversion for DynamoDB attributes
+   - Retry logic for operations after table creation
+   - Graceful handling of empty results
+   - Validates data before storage operations
+
+3. **Logging**
+   - Detailed error logging for debugging
+   - Operation status tracking
+   - Table creation events
+   - Retry attempts
+
+#### External API Storage
+1. **Request Handling**
+   - Validates API responses
+   - Handles HTTP status codes appropriately
+   - Manages authentication errors
+   - Tracks API rate limits
+
+2. **Error Recovery**
+   - Retries failed requests with backoff
+   - Handles network timeouts
+   - Validates response formats
+   - Reports detailed error messages
+
+Example error handling flow:
+```javascript
+try {
+    // Attempt operation
+    const result = await storage.createPTORecord(record);
+} catch (error) {
+    if (error.name === 'ResourceNotFoundException') {
+        // Auto-create table
+        await storage.createTable();
+        // Retry the operation
+        const result = await storage.createPTORecord(record);
+    }
+}
+```
 
 ## Setup
 1. Install dependencies:
@@ -197,42 +542,6 @@ node server.js
 "Extend my vacation next week by 2 days"
 "Change my sick leave tomorrow to vacation"
 "Cancel my PTO for next Friday"
-```
-
-## Architecture
-```mermaid
-graph TD
-    subgraph "Frontend (Browser)"
-        UI[Web Interface]
-        Calendar[Calendar View]
-        Chat[Chat Interface]
-    end
-
-    subgraph "Backend (Node.js)"
-        Server[Express Server]
-        DateUtils[Date Processing]
-        PTOUtils[PTO Categories]
-        Conv[Conversation Manager]
-    end
-
-    subgraph "AWS Services"
-        Bedrock[AWS Bedrock]
-        DynamoDB[DynamoDB]
-    end
-
-    UI --> |HTTP Requests| Server
-    Calendar --> |PTO Data| Server
-    Chat --> |Messages| Server
-    
-    Server --> |Natural Language| Bedrock
-    Server --> |CRUD Operations| DynamoDB
-    Server --> |Date Processing| DateUtils
-    Server --> |Category Validation| PTOUtils
-    Server --> |Context Management| Conv
-
-    DateUtils --> |Working Days| Server
-    PTOUtils --> |Category Info| Server
-    Conv --> |History| Server
 ```
 
 ## Security Notes
